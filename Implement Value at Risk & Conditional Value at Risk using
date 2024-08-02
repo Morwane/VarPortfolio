@@ -1,0 +1,210 @@
+import pandas as pd
+import numpy as np
+import datetime as dt
+import yfinance as yf
+import matplotlib.pyplot as plt
+from scipy.stats import norm,t
+
+# Import data
+def getData(stocks, start, end):
+    try:
+        # Télécharger les données
+        stockData = yf.download(stocks, start=start, end=end)['Close']
+        
+        # Exclure les colonnes avec trop de données manquantes
+        stockData = stockData.dropna(axis=1, how='all')
+        if stockData.empty:
+            raise ValueError("Les données téléchargées sont vides après suppression des actions non disponibles.")
+        
+        # Calcul des rendements
+        returns = stockData.pct_change().dropna()
+        if returns.empty:
+            raise ValueError("Les rendements calculés sont vides après suppression des données manquantes.")
+        
+        # Calcul des rendements moyens et de la matrice de covariance
+        meanReturns = returns.mean()
+        covMatrix = returns.cov()
+        return returns, meanReturns, covMatrix
+    except Exception as e:
+        print(f"Erreur lors du téléchargement des données : {e}")
+        raise
+
+# Portfolio Performance
+def portfolioPerformance(weights, meanReturns, covMatrix, Time):
+    returns = np.sum(meanReturns * weights) * Time
+    std = np.sqrt(np.dot(weights.T, np.dot(covMatrix, weights))) * np.sqrt(Time)
+    return returns, std
+
+# VaR and CVaR Calculation
+
+
+def historicalVaR(returns, alpha=5):
+    try:
+        if returns.empty:
+            raise ValueError("La série de rendements est vide.")
+        return np.percentile(returns, alpha)
+    except Exception as e:
+        print(f"Erreur lors du calcul de VaR historique : {e}")
+        raise
+
+def historicalCVaR(returns, alpha=5):
+    try:
+        if returns.empty:
+            raise ValueError("La série de rendements est vide.")
+        var = historicalVaR(returns, alpha)
+        belowVaR = returns <= var
+        return returns[belowVaR].mean()
+    except Exception as e:
+        print(f"Erreur lors du calcul de CVaR historique : {e}")
+        raise
+
+# Main Script
+# Liste des symboles d'actions du CAC40 (révisée)
+stockList = ['AIR.PA', 'OR.PA', 'SAN.PA', 'MC.PA', 'GLE.PA', 'BNP.PA', 'ACA.PA', 'BN.PA'] 
+endDate = dt.datetime.now()
+startDate = endDate - dt.timedelta(days=800)
+
+# Télécharger les données
+returns, meanReturns, covMatrix = getData(stockList, start=startDate, end=endDate)
+
+# Vérifier que les données sont disponibles
+if returns.empty or meanReturns.empty or covMatrix.empty:
+    raise ValueError("Les données du portefeuille sont vides après traitement.")
+
+# Générer des poids aléatoires pour le portefeuille
+weights = np.random.random(len(returns.columns))
+weights /= np.sum(weights)
+
+# Calcul des rendements du portefeuille
+returns['portfolio'] = returns.dot(weights)
+
+# Vérifier que les données du portefeuille ne sont pas vides
+if returns['portfolio'].empty:
+    raise ValueError("Les rendements du portefeuille sont vides.")
+
+# Calcul des mesures de risque
+Time = 100
+
+try:
+    hVaR = -historicalVaR(returns['portfolio'], alpha=5) * np.sqrt(Time)
+    hCVaR = -historicalCVaR(returns['portfolio'], alpha=5) * np.sqrt(Time)
+    pRet, pStd = portfolioPerformance(weights, meanReturns, covMatrix, Time)
+    
+    InitialInvestment = 10000
+    print('Expected Portfolio Return:      ', round(InitialInvestment * pRet, 2))
+    print('Value at Risk 95th CI    :      ', round(InitialInvestment * hVaR, 2))
+    print('Conditional VaR 95th CI  :      ', round(InitialInvestment * hCVaR, 2))
+except ValueError as e:
+    print(f"Erreur lors du calcul des mesures de risque : {e}")
+
+
+
+
+# Parametric Var 
+
+def var_parametric(portfolioReturns, portfolioStd, distribution='normal', alpha=5, dof=6):
+    # La distribution est symétrique
+    if distribution == 'normal':
+        VaR = norm.ppf(1 - alpha / 100) * portfolioStd - portfolioReturns
+    elif distribution == 't-distribution':
+        nu = dof
+        VaR = np.sqrt((nu - 2) / nu) * t.ppf(1 - alpha / 100, nu) * portfolioStd - portfolioReturns
+    else:
+        raise TypeError("Expected distribution type 'normal'/'t-distribution'")
+    return VaR
+
+def cvar_parametric(portfolioReturns, portfolioStd, distribution='normal', alpha=5, dof=6):
+    if distribution == 'normal':
+        CVaR = (alpha / 100) ** -1 * norm.pdf(norm.ppf(alpha / 100)) * portfolioStd - portfolioReturns
+    elif distribution == 't-distribution':
+        nu = dof
+        xanu = t.ppf(alpha / 100, nu)
+        CVaR = -1 / (alpha / 100) * (1 - nu ** -1) * (nu - 2 + xanu ** 2) * t.pdf(xanu, nu) * portfolioStd - portfolioReturns
+    else:
+        raise TypeError("Expected distribution type 'normal'/'t-distribution'")
+    return CVaR
+
+
+normVaR = var_parametric(pRet, pStd)
+normCVaR = cvar_parametric(pRet, pStd)
+
+tVaR = var_parametric(pRet, pStd, distribution='t-distribution')
+tCVaR = cvar_parametric(pRet, pStd, distribution='t-distribution')
+
+print("Normal VaR 95th CI       :      ", round(InitialInvestment*normVaR,2))
+print("Normal CVaR 95th CI      :      ", round(InitialInvestment*normCVaR,2))
+print("t-dist VaR 95th CI       :      ", round(InitialInvestment*tVaR,2))
+print("t-dist CVaR 95th CI      :      ", round(InitialInvestment*tCVaR,2))
+
+
+
+#Monte Carlo Var&Cvar
+
+mc_sims=100 #nombre de simulations
+T=100 #timzframe in days
+
+meanM = np.full(shape=(T, len(weights)), fill_value=meanReturns)
+meanM = meanM.T
+
+portfolio_sims = np.full(shape=(T, mc_sims), fill_value=0.0)
+
+initialPortfolio = 10000
+
+for m in range(0, mc_sims):
+    # MC loops
+    Z = np.random.normal(size=(T, len(weights)))
+    L = np.linalg.cholesky(covMatrix)
+    dailyReturns = meanM + np.inner(L, Z)
+    portfolio_sims[:,m] = np.cumprod(np.inner(weights, dailyReturns.T)+1)*initialPortfolio
+     
+
+plt.plot(portfolio_sims)
+plt.ylabel('Portfolio Value ($)')
+plt.xlabel('Days')
+plt.title('MonteCarlo simulation of a stock portfolio')
+plt.show()
+
+def mcVaR(returns, alpha=5):
+    """ Input: pandas series of returns
+        Output: percentile on return distribution to a given confidence level alpha
+    """
+    if isinstance(returns, pd.Series):
+        return np.percentile(returns, alpha)
+    else:
+        raise TypeError("Expected a pandas data series.")
+
+def mcCVaR(returns, alpha=5):
+    """ Input: pandas series of returns
+        Output: CVaR or Expected Shortfall to a given confidence level alpha
+    """
+    if isinstance(returns, pd.Series):
+        belowVaR = returns <= mcVaR(returns, alpha=alpha)
+        return returns[belowVaR].mean()
+    else:
+        raise TypeError("Expected a pandas data series.")
+    
+
+portResults = pd.Series(portfolio_sims[-1,:])
+
+VaR = initialPortfolio - mcVaR(portResults, alpha=5)
+CVaR = initialPortfolio - mcCVaR(portResults, alpha=5)
+
+print('VaR ${}'.format(round(VaR,2)))
+print('CVaR ${}'.format(round(CVaR,2)))
+
+
+
+print("\nVaR:")
+
+print(' historical VaR 95th CI   :      ', round(InitialInvestment*hVaR,2))
+print(" Normal VaR 95th CI       :      ", round(InitialInvestment*normVaR,2))
+print(" t-dist VaR 95th CI       :      ", round(InitialInvestment*tVaR,2))
+print(" MC VaR  95th CI          :      ", round(VaR,2))
+
+
+print("\nCVaR:")
+
+print(' historical CVaR 95th CI  :      ', round(InitialInvestment*hCVaR,2))
+print(" Normal CVaR 95th CI      :      ", round(InitialInvestment*normCVaR,2))
+print(" t-dist CVaR 95th CI      :      ", round(InitialInvestment*tCVaR,2))
+print(" MC CVaR 95th CI          :      ", round(CVaR,2))
